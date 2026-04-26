@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { supabase, isSupabaseConfigured } from "./supabase";
 
 const STYLES = `
   @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,700;1,400&family=DM+Sans:wght@300;400;500&display=swap');
@@ -122,6 +123,8 @@ const DAYS = ["Mo","Tu","We","Th","Fr","Sa","Su"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
 const STORAGE_KEY = "habla_v1";
+const CLOUD_TABLE = "user_state";
+const SYNC_INTERVAL_MS = 30 * 60 * 1000;
 const loadStore = () => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)||"{}"); } catch { return {}; } };
 const saveStore = (d) => { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {} };
 
@@ -189,7 +192,61 @@ export default function HablaApp() {
   const [draftChapterName, setDraftChapterName] = useState("");
   const [draftVocab, setDraftVocab] = useState([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [user, setUser] = useState(null);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [syncBusy, setSyncBusy] = useState(false);
+  const [syncError, setSyncError] = useState("");
+  const [lastSyncAt, setLastSyncAt] = useState("");
   const fileInputRef = useRef(null);
+  const hasHydrated = useRef(false);
+
+  const buildPayload = useCallback((newSessions, newSettings, newWeaknesses, newChapters) => ({
+    sessions: newSessions,
+    settings: newSettings,
+    grammarWeaknesses: newWeaknesses,
+    chapters: newChapters,
+    updatedAt: new Date().toISOString(),
+  }), []);
+
+  const pullCloudState = useCallback(async (uid) => {
+    if (!supabase || !uid) return;
+    const { data, error } = await supabase
+      .from(CLOUD_TABLE)
+      .select("payload")
+      .eq("user_id", uid)
+      .maybeSingle();
+    if (error) throw error;
+    if (!data?.payload) return;
+    const cloud = data.payload;
+    if (cloud.sessions) setSessions(cloud.sessions);
+    if (cloud.settings) setSettings(cloud.settings);
+    if (cloud.grammarWeaknesses) setGrammarWeaknesses(cloud.grammarWeaknesses);
+    if (cloud.chapters) setChapters(cloud.chapters);
+    saveStore(cloud);
+    setLastSyncAt(new Date().toISOString());
+  }, []);
+
+  const persist = useCallback(async (newSessions, newSettings, newWeaknesses, newChapters, options = {}) => {
+    const payload = buildPayload(newSessions, newSettings, newWeaknesses, newChapters);
+    saveStore(payload);
+    if (!supabase || !user) return;
+    if (options.silent !== true) setSyncBusy(true);
+    setSyncError("");
+    const { error } = await supabase.from(CLOUD_TABLE).upsert({
+      user_id: user.id,
+      payload,
+      updated_at: new Date().toISOString(),
+    });
+    if (options.silent !== true) setSyncBusy(false);
+    if (error) {
+      setSyncError(error.message || "Cloud sync failed.");
+      return;
+    }
+    setLastSyncAt(new Date().toISOString());
+  }, [buildPayload, user]);
 
   useEffect(() => {
     const s = loadStore();
@@ -197,7 +254,23 @@ export default function HablaApp() {
     if (s.settings) setSettings(s.settings);
     if (s.grammarWeaknesses) setGrammarWeaknesses(s.grammarWeaknesses);
     if (s.chapters) setChapters(s.chapters);
+    hasHydrated.current = true;
   }, []);
+
+  useEffect(() => {
+    if (!isSupabaseConfigured || !supabase) return;
+    supabase.auth.getSession().then(({ data }) => setUser(data.session?.user || null));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user || null);
+      setAuthError("");
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    pullCloudState(user.id).catch((err) => setSyncError(err.message || "Could not pull cloud data."));
+  }, [user, pullCloudState]);
 
   useEffect(() => {
     if (selectedChapterId && !chapters.some(c => c.id === selectedChapterId)) setSelectedChapterId("");
@@ -216,9 +289,13 @@ export default function HablaApp() {
     setStreak(count);
   }, [sessions]);
 
-  const persist = useCallback((newSessions, newSettings, newWeaknesses, newChapters) => {
-    saveStore({ sessions: newSessions, settings: newSettings, grammarWeaknesses: newWeaknesses, chapters: newChapters });
-  }, []);
+  useEffect(() => {
+    if (!user || !hasHydrated.current) return;
+    const id = window.setInterval(() => {
+      persist(sessions, settings, grammarWeaknesses, chapters, { silent: true });
+    }, SYNC_INTERVAL_MS);
+    return () => window.clearInterval(id);
+  }, [chapters, grammarWeaknesses, persist, sessions, settings, user]);
 
   const updateSettings = (s) => { setSettings(s); persist(sessions, s, grammarWeaknesses, chapters); };
 
@@ -363,6 +440,37 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
     setDraftChapterName("");
     setDraftVocab([]);
     setLibraryError("");
+  };
+
+  const handleAuth = async (mode) => {
+    if (!supabase) return;
+    setAuthBusy(true);
+    setAuthError("");
+    const email = authEmail.trim();
+    if (!email || !authPassword) {
+      setAuthBusy(false);
+      setAuthError("Enter both email and password.");
+      return;
+    }
+    const { error } = mode === "signup"
+      ? await supabase.auth.signUp({ email, password: authPassword })
+      : await supabase.auth.signInWithPassword({ email, password: authPassword });
+    setAuthBusy(false);
+    if (error) {
+      setAuthError(error.message || "Authentication failed.");
+      return;
+    }
+    setAuthPassword("");
+  };
+
+  const signOut = async () => {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setUser(null);
+  };
+
+  const manualSync = async () => {
+    await persist(sessions, settings, grammarWeaknesses, chapters);
   };
 
   const reset = () => { setPhase("idle"); setBrief(null); setFeedback(null); setTranscription(""); };
@@ -764,6 +872,37 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
           </div>
         </>
       )}
+      <p className="section-label" style={{marginBottom:6}}>Cloud sync</p>
+      <div className="card">
+        {!isSupabaseConfigured ? (
+          <p className="card-sub">Set <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> to enable email login + cross-device sync.</p>
+        ) : user ? (
+          <>
+            <p className="card-sub">Signed in as <strong>{user.email}</strong>.</p>
+            <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+              <button className="btn btn-secondary btn-sm" disabled={syncBusy} onClick={manualSync}>{syncBusy ? "Syncing…" : "Sync now"}</button>
+              <button className="btn btn-ghost btn-sm" onClick={signOut}>Sign out</button>
+            </div>
+            <p className="settings-sub" style={{marginTop:8}}>
+              Last sync: {lastSyncAt ? new Date(lastSyncAt).toLocaleString("en-GB") : "Not yet"}
+            </p>
+            {syncError && <p style={{fontSize:12, color:"var(--error)", marginTop:8}}>{syncError}</p>}
+          </>
+        ) : (
+          <>
+            <p className="card-sub">Sign in (or create account) to sync data every 30 minutes across your devices.</p>
+            <div style={{display:"grid", gap:8}}>
+              <input className="text-input" type="email" placeholder="you@example.com" value={authEmail} onChange={(e) => setAuthEmail(e.target.value)} />
+              <input className="text-input" type="password" placeholder="Password" value={authPassword} onChange={(e) => setAuthPassword(e.target.value)} />
+            </div>
+            <div style={{display:"flex", gap:8, marginTop:10}}>
+              <button className="btn btn-primary btn-sm" disabled={authBusy} onClick={() => handleAuth("signin")}>{authBusy ? "Please wait…" : "Sign in"}</button>
+              <button className="btn btn-ghost btn-sm" disabled={authBusy} onClick={() => handleAuth("signup")}>Create account</button>
+            </div>
+            {authError && <p style={{fontSize:12, color:"var(--error)", marginTop:8}}>{authError}</p>}
+          </>
+        )}
+      </div>
       <p className="section-label" style={{marginBottom:6}}>Stats</p>
       <div className="card">
         <div className="settings-row">

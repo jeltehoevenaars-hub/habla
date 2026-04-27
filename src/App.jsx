@@ -462,7 +462,7 @@ Geef JSON terug:
   "vocab": [{"word":"","translation":"","type":""}],
   "grammar": [{"rule":"","explanation":"","example":""}]
 }
-${vocabCount} vocab-items, ${grammarCount} grammaticaregel(s). Maak de opdracht realistisch en gesitueerd in Spanje.${chapterCtx}`;
+${vocabCount} vocab-items, ${grammarCount} grammaticaregel(s). Maak de opdracht realistisch en gesitueerd in een Spaans-sprekend land.${chapterCtx}`;
 
     try {
       const raw = await callLLM([{ role:"user", content:prompt }], system);

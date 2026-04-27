@@ -187,8 +187,8 @@ Use this as an exact sequence:
   - [ ] (Optional) Turn off email confirmation for faster local testing in **Authentication → Settings**
 
 - [ ] **Set local environment variables**
-  - [ ] Create `.env.local` at repo root (same folder as `package.json`)
-  - [ ] Add:
+  - [ ] Copy `.env.example` to `.env.local`
+  - [ ] Fill values:
     ```bash
     VITE_SUPABASE_URL=your_project_url
     VITE_SUPABASE_ANON_KEY=your_anon_key

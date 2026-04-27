@@ -9,7 +9,7 @@ Habla generates personalised speaking and writing exercises, tracks your grammar
 ## Features
 
 - **CEFR levels** A1 → C2 with adaptive content
-- **Skill focus** — Speaking, Writing, or Both per session
+- **Skill focus** — Writing-first session flow
 - **Time budget** — 5, 15, or 30 minute sessions
 - **Grammar weakness tracker** — silently targets your recurring errors
 - **Structured feedback** — corrections, score (%), and natural phrasing tips

@@ -937,11 +937,11 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
           </div>
         </header>
         <main style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
-          {tab==="home" && <HomeView/>}
-          {tab==="calendar" && <CalendarView/>}
-          {tab==="history" && <HistoryView/>}
-          {tab==="library" && <LibraryView/>}
-          {tab==="settings" && <SettingsView/>}
+          {tab==="home" && HomeView()}
+          {tab==="calendar" && CalendarView()}
+          {tab==="history" && HistoryView()}
+          {tab==="library" && LibraryView()}
+          {tab==="settings" && SettingsView()}
         </main>
         <nav className="nav">
           {[

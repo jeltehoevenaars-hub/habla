@@ -272,6 +272,7 @@ export default function HablaApp() {
   const [libraryBusy, setLibraryBusy] = useState(false);
   const [libraryError, setLibraryError] = useState("");
   const [librarySelectedChapterId, setLibrarySelectedChapterId] = useState("");
+  const [homeChapterPickerId, setHomeChapterPickerId] = useState("");
   const [draftVocab, setDraftVocab] = useState([]);
   const [draftFileCount, setDraftFileCount] = useState(0);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -639,20 +640,43 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
               ))}
             </div>
             <p className="section-label">Chapters (choose one or more)</p>
-            <div className="chip-group">
-              {chapters.map((chapter) => (
-                <button
-                  key={chapter.id}
-                  className={`chip ${selectedChapterIds.includes(chapter.id) ? "active" : ""}`}
-                  onClick={() => setSelectedChapterIds((prev) => (
-                    prev.includes(chapter.id)
-                      ? prev.filter((id) => id !== chapter.id)
-                      : [...prev, chapter.id]
-                  ))}
-                >
-                  {chapter.order}. {chapter.name}
-                </button>
-              ))}
+            <div style={{display:"grid", gap:8}}>
+              <select className="select" value={homeChapterPickerId} onChange={(e) => setHomeChapterPickerId(e.target.value)}>
+                <option value="">Choose a chapter</option>
+                {chapters.map((chapter) => (
+                  <option key={chapter.id} value={chapter.id}>{chapter.order}. {chapter.name}</option>
+                ))}
+              </select>
+              <button
+                className="btn btn-secondary btn-sm"
+                disabled={!homeChapterPickerId}
+                onClick={() => {
+                  setSelectedChapterIds((prev) => (
+                    homeChapterPickerId && !prev.includes(homeChapterPickerId)
+                      ? [...prev, homeChapterPickerId]
+                      : prev
+                  ));
+                  setHomeChapterPickerId("");
+                }}
+              >
+                + Add chapter
+              </button>
+            </div>
+            <div className="chip-group" style={{marginTop:8}}>
+              {selectedChapterIds.length === 0 && <span className="chip">No chapter selected</span>}
+              {selectedChapterIds.map((id) => {
+                const chapter = chapters.find((item) => item.id === id);
+                if (!chapter) return null;
+                return (
+                  <button
+                    key={chapter.id}
+                    className="chip active"
+                    onClick={() => setSelectedChapterIds((prev) => prev.filter((chapterId) => chapterId !== chapter.id))}
+                  >
+                    {chapter.order}. {chapter.name} ×
+                  </button>
+                );
+              })}
             </div>
           </div>
           <button className="btn btn-primary" onClick={() => generateBrief()}>✦ Start Session</button>
@@ -915,98 +939,128 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
     );
   };
 
-  const LibraryView = () => (
-    <div className="page">
-      <p className="section-label" style={{marginBottom:6}}>Workbook chapters</p>
-      {chapters.map((ch) => (
-        <div
-          key={ch.id}
-          className="chapter-card"
-          style={librarySelectedChapterId === ch.id ? { borderColor:"var(--terracotta)", background:"#FFF7F2" } : {}}
-        >
-          <div>
-            <p className="chapter-name">{ch.order}. {ch.name}</p>
-            <p className="chapter-meta">{ch.vocab.length} vocabulary pairs · {ch.filesUploaded} file(s)</p>
+  const LibraryView = () => {
+    const activeChapter = chapters.find((chapter) => chapter.id === librarySelectedChapterId);
+    if (activeChapter) {
+      return (
+        <div className="page">
+          <button className="btn btn-ghost btn-sm" style={{marginBottom:10, width:"auto"}} onClick={() => {
+            setLibrarySelectedChapterId("");
+            setDraftVocab([]);
+            setDraftFileCount(0);
+            setLibraryError("");
+          }}>
+            ← Back to chapters
+          </button>
+          <h2 style={{fontFamily:"'Playfair Display',serif", fontSize:18, marginBottom:4}}>{activeChapter.order}. {activeChapter.name}</h2>
+          <p className="card-sub">{activeChapter.vocab.length} vocabulary pairs · {activeChapter.filesUploaded} file(s) uploaded</p>
+
+          <div className="card">
+            <p className="section-label" style={{marginBottom:6}}>Upload files</p>
+            <div
+              className={`dropzone ${isDragOver ? "drag" : ""}`}
+              onClick={() => fileInputRef.current?.click()}
+              onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+              onDragLeave={() => setIsDragOver(false)}
+              onDrop={(e) => {
+                e.preventDefault();
+                setIsDragOver(false);
+                handleImageUploadBatch(e.dataTransfer.files);
+              }}
+            >
+              <p style={{fontSize:22, marginBottom:6}}>🖼️</p>
+              <p>Drop one or multiple workbook photos, or tap to upload.</p>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              style={{display:"none"}}
+              onChange={(e) => handleImageUploadBatch(e.target.files)}
+            />
+
+            {libraryBusy && <div className="loading" style={{padding:"20px 0"}}><div className="spinner"/><p className="loading-text">Extracting vocabulary…</p></div>}
+            {libraryError && <p style={{fontSize:12, color:"var(--error)", marginBottom:8}}>{libraryError}</p>}
+
+            {draftVocab.length > 0 && (
+              <>
+                <p className="section-label" style={{marginTop:10}}>New vocabulary from upload</p>
+                <table className="vocab-table">
+                  <thead>
+                    <tr><th>Spanish</th><th>English</th><th/></tr>
+                  </thead>
+                  <tbody>
+                    {draftVocab.map((item, i) => (
+                      <tr key={i}>
+                        <td><input className="table-input" value={item.word} onChange={(e) => {
+                          const next = [...draftVocab];
+                          next[i] = { ...next[i], word: e.target.value };
+                          setDraftVocab(next);
+                        }} /></td>
+                        <td><input className="table-input" value={item.translation} onChange={(e) => {
+                          const next = [...draftVocab];
+                          next[i] = { ...next[i], translation: e.target.value };
+                          setDraftVocab(next);
+                        }} /></td>
+                        <td><button className="btn btn-ghost btn-sm" onClick={() => setDraftVocab(draftVocab.filter((_, idx) => idx !== i))}>Delete</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div style={{display:"flex", gap:8, marginTop:10}}>
+                  <button className="btn btn-secondary btn-sm" onClick={() => setDraftVocab([...draftVocab, { word:"", translation:"" }])}>+ Add row</button>
+                  <button className="btn btn-primary btn-sm" onClick={saveDraftToChapter}>Save to chapter</button>
+                </div>
+              </>
+            )}
           </div>
-          <div style={{display:"flex", gap:8}}>
+
+          <div className="card">
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6}}>
+              <p className="section-label" style={{marginBottom:0}}>Existing vocabulary</p>
+              {activeChapter.vocab.length > 0 && <button className="btn btn-ghost btn-sm" onClick={() => clearChapterData(activeChapter.id)}>Clear chapter data</button>}
+            </div>
+            {activeChapter.vocab.length === 0 ? (
+              <p className="card-sub" style={{marginBottom:0}}>No vocabulary saved for this chapter yet.</p>
+            ) : (
+              <table className="vocab-table">
+                <thead><tr><th>Spanish</th><th>English</th></tr></thead>
+                <tbody>
+                  {activeChapter.vocab.map((item, idx) => (
+                    <tr key={`${item.word}-${item.translation}-${idx}`}>
+                      <td>{item.word}</td>
+                      <td>{item.translation}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="page">
+        <p className="section-label" style={{marginBottom:6}}>Workbook chapters</p>
+        {chapters.map((ch) => (
+          <div key={ch.id} className="chapter-card">
+            <div>
+              <p className="chapter-name">{ch.order}. {ch.name}</p>
+              <p className="chapter-meta">{ch.vocab.length} vocabulary pairs · {ch.filesUploaded} file(s)</p>
+            </div>
             <button className="btn btn-secondary btn-sm" onClick={() => {
               setLibrarySelectedChapterId(ch.id);
               setDraftVocab([]);
               setDraftFileCount(0);
               setLibraryError("");
-            }}>Select</button>
-            {ch.vocab.length > 0 && <button className="btn btn-ghost btn-sm" onClick={() => clearChapterData(ch.id)}>Clear</button>}
+            }}>Open</button>
           </div>
-        </div>
-      ))}
-
-      {librarySelectedChapterId && (
-        <div className="card">
-          <p className="section-label" style={{marginBottom:6}}>Upload to chapter</p>
-          <p className="card-sub">
-            {chapters.find((chapter) => chapter.id === librarySelectedChapterId)?.name}
-          </p>
-          <div
-            className={`dropzone ${isDragOver ? "drag" : ""}`}
-            onClick={() => fileInputRef.current?.click()}
-            onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
-            onDragLeave={() => setIsDragOver(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setIsDragOver(false);
-              handleImageUploadBatch(e.dataTransfer.files);
-            }}
-          >
-            <p style={{fontSize:22, marginBottom:6}}>🖼️</p>
-            <p>Drop one or multiple workbook photos, or tap to upload.</p>
-          </div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            style={{display:"none"}}
-            onChange={(e) => handleImageUploadBatch(e.target.files)}
-          />
-
-          {libraryBusy && <div className="loading" style={{padding:"20px 0"}}><div className="spinner"/><p className="loading-text">Extracting vocabulary…</p></div>}
-          {libraryError && <p style={{fontSize:12, color:"var(--error)", marginBottom:8}}>{libraryError}</p>}
-
-          {draftVocab.length > 0 && (
-            <>
-              <p className="section-label" style={{marginTop:10}}>Review vocabulary</p>
-              <table className="vocab-table">
-                <thead>
-                  <tr><th>Spanish</th><th>English</th><th/></tr>
-                </thead>
-                <tbody>
-                  {draftVocab.map((item, i) => (
-                    <tr key={i}>
-                      <td><input className="table-input" value={item.word} onChange={(e) => {
-                        const next = [...draftVocab];
-                        next[i] = { ...next[i], word: e.target.value };
-                        setDraftVocab(next);
-                      }} /></td>
-                      <td><input className="table-input" value={item.translation} onChange={(e) => {
-                        const next = [...draftVocab];
-                        next[i] = { ...next[i], translation: e.target.value };
-                        setDraftVocab(next);
-                      }} /></td>
-                      <td><button className="btn btn-ghost btn-sm" onClick={() => setDraftVocab(draftVocab.filter((_, idx) => idx !== i))}>Delete</button></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              <div style={{display:"flex", gap:8, marginTop:10}}>
-                <button className="btn btn-secondary btn-sm" onClick={() => setDraftVocab([...draftVocab, { word:"", translation:"" }])}>+ Add row</button>
-                <button className="btn btn-primary btn-sm" onClick={saveDraftToChapter}>Save to chapter</button>
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
+        ))}
+      </div>
+    );
+  };
 
   const SettingsView = () => (
     <div className="page">

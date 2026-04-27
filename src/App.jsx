@@ -159,7 +159,22 @@ async function callLLM(messages, system) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ system, messages }),
   });
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  if (!res.ok) {
+    let details = "";
+    try {
+      const body = await res.json();
+      details = body?.error || "";
+    } catch {
+      try {
+        details = await res.text();
+      } catch {
+        details = "";
+      }
+    }
+    const cleanedDetails = String(details || "").replace(/\s+/g, " ").trim();
+    const suffix = cleanedDetails ? ` - ${cleanedDetails.slice(0, 160)}` : "";
+    throw new Error(`Upload API error (${res.status})${suffix}`);
+  }
   const data = await res.json();
   return data.text || "";
 }
@@ -187,12 +202,33 @@ async function extractVocab(imageFile) {
   }];
   const system = "You are a vocabulary extraction assistant. Extract Spanish–English word pairs from workbook images. Respond ONLY with valid JSON.";
   const result = await callLLM(messages, system);
-  const parsed = JSON.parse(result.replace(/```json|```/g, "").trim());
+  let parsed;
+  try {
+    parsed = JSON.parse(result.replace(/```json|```/g, "").trim());
+  } catch {
+    throw new Error("Upload parsing error (invalid JSON response)");
+  }
   return {
     vocab: Array.isArray(parsed.vocab) ? parsed.vocab : [],
     detectedTitle: parsed.detectedTitle || "",
   };
 }
+
+const summarizeUploadErrors = (errors = []) => {
+  const normalized = errors
+    .map((error) => String(error || "").trim())
+    .filter(Boolean)
+    .map((msg) => msg.split("\n")[0].trim());
+  if (!normalized.length) return "";
+  const counts = new Map();
+  normalized.forEach((msg) => counts.set(msg, (counts.get(msg) || 0) + 1));
+  const summary = Array.from(counts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 2)
+    .map(([msg, count]) => `${count}× ${msg}`)
+    .join("; ");
+  return summary ? `Reason(s): ${summary}.` : "";
+};
 
 const toCleanVocabPairs = (pairs = []) => pairs
   .map((v) => ({ word: String(v.word || "").trim(), translation: String(v.translation || "").trim() }))
@@ -547,25 +583,28 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
     try {
       const extractedRows = [];
       let failed = 0;
+      const failedReasons = [];
       for (const file of files) {
         try {
           const extracted = await extractVocab(file);
           extractedRows.push(...toCleanVocabPairs(extracted.vocab));
-        } catch {
+        } catch (error) {
           failed += 1;
+          failedReasons.push(error?.message || "Unknown upload error");
         }
       }
+      const reasonSummary = summarizeUploadErrors(failedReasons);
       if (extractedRows.length > 0) {
         setDraftVocab((prev) => mergeUniqueVocab(prev, extractedRows));
         setDraftFileCount((prev) => prev + (files.length - failed));
       }
       if (extractedRows.length === 0) {
-        setLibraryError("Could not extract vocabulary from the selected images. Please try clearer photos.");
+        setLibraryError(`Could not extract vocabulary from the selected images. ${reasonSummary || "Please try again."}`);
       } else if (failed > 0) {
-        setLibraryError(`Processed ${files.length - failed} file(s). ${failed} file(s) failed.`);
+        setLibraryError(`Processed ${files.length - failed} file(s). ${failed} file(s) failed. ${reasonSummary}`);
       }
-    } catch {
-      setLibraryError("Could not extract vocabulary from image. Please try a clearer photo.");
+    } catch (error) {
+      setLibraryError(`Could not extract vocabulary from image. ${error?.message || "Please try again."}`);
     } finally {
       setLibraryBusy(false);
     }

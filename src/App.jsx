@@ -117,10 +117,35 @@ const STYLES = `
 `;
 
 const CEFR_LEVELS = ["A1","A2","B1","B2","C1","C2"];
-const SKILL_OPTIONS = ["Speaking","Writing","Both"];
 const TIME_OPTIONS = [{ label:"5 min", value:5 },{ label:"15 min", value:15 },{ label:"30 min", value:30 }];
 const DAYS = ["Mo","Tu","We","Th","Fr","Sa","Su"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+const DEFAULT_SETTINGS = { level:"B1", skill:"Writing", time:15 };
+const WORKBOOK_CHAPTER_NAMES = [
+  "Bienvenidos al mundo español",
+  "Primeros encuentros",
+  "La familia española",
+  "Datos personales",
+  "Un día cotidiano",
+  "De viaje",
+  "Hemos llegado en el hotel",
+  "Vamos de compras",
+  "¿La carta, por favor?",
+  "Me duele la cabeza",
+  "¿Dígame? La llamada telefónica y el correa electrónico",
+  "Internet y medios sociales",
+  "Deporte, aficiones y sueños",
+  "Hablar del pasado",
+  "Dímelo",
+  "En la oficina",
+];
+const WORKBOOK_CHAPTERS = WORKBOOK_CHAPTER_NAMES.map((name, idx) => ({
+  id: `chapter-${idx + 1}`,
+  order: idx + 1,
+  name,
+  vocab: [],
+  filesUploaded: 0,
+}));
 
 const STORAGE_KEY = "habla_v1";
 const CLOUD_TABLE = "user_state";
@@ -169,12 +194,69 @@ async function extractVocab(imageFile) {
   };
 }
 
+const toCleanVocabPairs = (pairs = []) => pairs
+  .map((v) => ({ word: String(v.word || "").trim(), translation: String(v.translation || "").trim() }))
+  .filter((v) => v.word && v.translation);
+
+const mergeUniqueVocab = (current = [], incoming = []) => {
+  const seen = new Set();
+  const merged = [];
+  [...current, ...incoming].forEach((item) => {
+    const word = String(item.word || "").trim();
+    const translation = String(item.translation || "").trim();
+    if (!word || !translation) return;
+    const key = `${word.toLowerCase()}::${translation.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    merged.push({ word, translation });
+  });
+  return merged;
+};
+
+const normalizeSettings = (raw) => ({
+  level: CEFR_LEVELS.includes(raw?.level) ? raw.level : DEFAULT_SETTINGS.level,
+  skill: "Writing",
+  time: TIME_OPTIONS.some((t) => t.value === raw?.time) ? raw.time : DEFAULT_SETTINGS.time,
+});
+
+const normalizeChapters = (raw = []) => {
+  const byId = new Map(WORKBOOK_CHAPTERS.map((chapter) => [chapter.id, { ...chapter }]));
+  const byName = new Map(WORKBOOK_CHAPTERS.map((chapter) => [chapter.name.toLowerCase(), chapter.id]));
+  if (!Array.isArray(raw)) return Array.from(byId.values());
+  raw.forEach((chapter) => {
+    const incomingName = String(chapter?.name || "").trim();
+    const mappedId = byId.has(chapter?.id) ? chapter.id : byName.get(incomingName.toLowerCase());
+    if (!mappedId) return;
+    const target = byId.get(mappedId);
+    target.vocab = mergeUniqueVocab(target.vocab, chapter?.vocab || []);
+    target.filesUploaded += Number(chapter?.filesUploaded || 0) || (Array.isArray(chapter?.vocab) && chapter.vocab.length > 0 ? 1 : 0);
+    byId.set(mappedId, target);
+  });
+  return Array.from(byId.values());
+};
+
+const normalizeSessions = (raw = []) => {
+  const validChapterIds = new Set(WORKBOOK_CHAPTERS.map((c) => c.id));
+  if (!Array.isArray(raw)) return [];
+  return raw.map((session) => {
+    const chapterIds = Array.isArray(session.chapterIds)
+      ? session.chapterIds.filter((id) => validChapterIds.has(id))
+      : (validChapterIds.has(session.chapterId) ? [session.chapterId] : []);
+    return {
+      ...session,
+      skill: "Writing",
+      chapterIds,
+      chapterId: chapterIds[0] || null,
+    };
+  });
+};
+
 export default function HablaApp() {
   const [tab, setTab] = useState("home");
-  const [settings, setSettings] = useState({ level:"B1", skill:"Speaking", time:15 });
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [sessions, setSessions] = useState([]);
-  const [chapters, setChapters] = useState([]);
-  const [selectedChapterId, setSelectedChapterId] = useState("");
+  const [chapters, setChapters] = useState(WORKBOOK_CHAPTERS);
+  const [selectedChapterIds, setSelectedChapterIds] = useState([]);
   const [streak, setStreak] = useState(0);
   const [grammarWeaknesses, setGrammarWeaknesses] = useState([]);
 
@@ -189,8 +271,9 @@ export default function HablaApp() {
 
   const [libraryBusy, setLibraryBusy] = useState(false);
   const [libraryError, setLibraryError] = useState("");
-  const [draftChapterName, setDraftChapterName] = useState("");
+  const [librarySelectedChapterId, setLibrarySelectedChapterId] = useState("");
   const [draftVocab, setDraftVocab] = useState([]);
+  const [draftFileCount, setDraftFileCount] = useState(0);
   const [isDragOver, setIsDragOver] = useState(false);
   const [user, setUser] = useState(null);
   const [authEmail, setAuthEmail] = useState("");
@@ -221,11 +304,16 @@ export default function HablaApp() {
     if (error) throw error;
     if (!data?.payload) return;
     const cloud = data.payload;
-    if (cloud.sessions) setSessions(cloud.sessions);
-    if (cloud.settings) setSettings(cloud.settings);
+    if (cloud.sessions) setSessions(normalizeSessions(cloud.sessions));
+    if (cloud.settings) setSettings(normalizeSettings(cloud.settings));
     if (cloud.grammarWeaknesses) setGrammarWeaknesses(cloud.grammarWeaknesses);
-    if (cloud.chapters) setChapters(cloud.chapters);
-    saveStore(cloud);
+    setChapters(normalizeChapters(cloud.chapters));
+    saveStore({
+      ...cloud,
+      sessions: normalizeSessions(cloud.sessions),
+      settings: normalizeSettings(cloud.settings),
+      chapters: normalizeChapters(cloud.chapters),
+    });
     setLastSyncAt(new Date().toISOString());
   }, []);
 
@@ -250,10 +338,10 @@ export default function HablaApp() {
 
   useEffect(() => {
     const s = loadStore();
-    if (s.sessions) setSessions(s.sessions);
-    if (s.settings) setSettings(s.settings);
+    if (s.sessions) setSessions(normalizeSessions(s.sessions));
+    if (s.settings) setSettings(normalizeSettings(s.settings));
     if (s.grammarWeaknesses) setGrammarWeaknesses(s.grammarWeaknesses);
-    if (s.chapters) setChapters(s.chapters);
+    setChapters(normalizeChapters(s.chapters));
     hasHydrated.current = true;
   }, []);
 
@@ -273,8 +361,14 @@ export default function HablaApp() {
   }, [user, pullCloudState]);
 
   useEffect(() => {
-    if (selectedChapterId && !chapters.some(c => c.id === selectedChapterId)) setSelectedChapterId("");
-  }, [chapters, selectedChapterId]);
+    const valid = new Set(chapters.map((c) => c.id));
+    setSelectedChapterIds((prev) => prev.filter((id) => valid.has(id)));
+    if (librarySelectedChapterId && !valid.has(librarySelectedChapterId)) {
+      setLibrarySelectedChapterId("");
+      setDraftVocab([]);
+      setDraftFileCount(0);
+    }
+  }, [chapters, librarySelectedChapterId]);
 
   useEffect(() => {
     let count = 0;
@@ -297,27 +391,52 @@ export default function HablaApp() {
     return () => window.clearInterval(id);
   }, [chapters, grammarWeaknesses, persist, sessions, settings, user]);
 
-  const updateSettings = (s) => { setSettings(s); persist(sessions, s, grammarWeaknesses, chapters); };
+  const updateSettings = (s) => {
+    const normalized = normalizeSettings(s);
+    setSettings(normalized);
+    persist(sessions, normalized, grammarWeaknesses, chapters);
+  };
 
-  const saveChapter = (chapter) => {
-    const newChapters = [chapter, ...chapters];
+  const saveDraftToChapter = () => {
+    if (!librarySelectedChapterId) {
+      setLibraryError("Please choose a chapter first.");
+      return;
+    }
+    const cleanedVocab = toCleanVocabPairs(draftVocab);
+    if (!cleanedVocab.length) {
+      setLibraryError("Please provide at least one valid word + translation pair.");
+      return;
+    }
+    const newChapters = chapters.map((chapter) => {
+      if (chapter.id !== librarySelectedChapterId) return chapter;
+      return {
+        ...chapter,
+        vocab: mergeUniqueVocab(chapter.vocab, cleanedVocab),
+        filesUploaded: chapter.filesUploaded + Math.max(draftFileCount, 1),
+      };
+    });
+    setChapters(newChapters);
+    persist(sessions, settings, grammarWeaknesses, newChapters);
+    setDraftVocab([]);
+    setDraftFileCount(0);
+    setLibraryError("");
+  };
+
+  const clearChapterData = (id) => {
+    const newChapters = chapters.map((chapter) => (
+      chapter.id === id ? { ...chapter, vocab: [], filesUploaded: 0 } : chapter
+    ));
     setChapters(newChapters);
     persist(sessions, settings, grammarWeaknesses, newChapters);
   };
 
-  const deleteChapter = (id) => {
-    const newChapters = chapters.filter(c => c.id !== id);
-    setChapters(newChapters);
-    persist(sessions, settings, grammarWeaknesses, newChapters);
-    if (selectedChapterId === id) setSelectedChapterId("");
-  };
-
-  const generateBrief = async (retryTopic = null) => {
+  const generateBrief = async (retryTopic = null, forcedChapterIds = null) => {
     setPhase("generating");
     setFeedback(null);
     setTranscription("");
 
-    const selectedChapter = chapters.find(c => c.id === selectedChapterId);
+    const activeChapterIds = Array.isArray(forcedChapterIds) ? forcedChapterIds : selectedChapterIds;
+    const selectedChapters = chapters.filter((c) => activeChapterIds.includes(c.id) && c.vocab.length > 0);
     const weakCtx = grammarWeaknesses.length
       ? `The learner struggles with: ${grammarWeaknesses.slice(0,4).join(", ")}. Naturally embed practice of these in the prompt.`
       : "";
@@ -328,8 +447,8 @@ export default function HablaApp() {
     const vocabCount = settings.time === 5 ? 4 : settings.time === 15 ? 7 : 10;
     const grammarCount = settings.time === 5 ? 1 : 2;
 
-    const chapterCtx = selectedChapter
-      ? `\n\nThis session is based on Chapter: "${selectedChapter.name}".\nYou MUST build the exercise using ONLY the following vocabulary. Do not introduce any words, phrases, or topics outside this list:\n\n${selectedChapter.vocab.map(v => `- ${v.word}: ${v.translation}`).join("\n")}\n\nPick a realistic scenario where these words arise naturally. The "vocab" field in your JSON response must be drawn exclusively from the list above (pick the most relevant subset for the exercise).`
+    const chapterCtx = selectedChapters.length
+      ? `\n\nThis session must use workbook chapters: ${selectedChapters.map((c) => `"${c.name}"`).join(", ")}.\nYou MUST build the exercise using ONLY the following vocabulary. Do not introduce words, phrases, or topics outside this list:\n\n${selectedChapters.flatMap((chapter) => chapter.vocab.map((v) => `- ${v.word}: ${v.translation}`)).join("\n")}\n\nPick a realistic scenario where these words arise naturally. The "vocab" field in your JSON response must be drawn exclusively from the list above (pick the most relevant subset for the exercise).`
       : "";
 
     const prompt = `Generate a ${settings.time}-min ${settings.skill.toLowerCase()} exercise for ${settings.level}.
@@ -347,7 +466,14 @@ ${vocabCount} vocab items, ${grammarCount} grammar rule(s). Make the prompt real
     try {
       const raw = await callLLM([{ role:"user", content:prompt }], system);
       const data = JSON.parse(raw.replace(/```json|```/g,"").trim());
-      setBrief({ ...data, skill:settings.skill, level:settings.level, time:settings.time, retryTopic, chapterId: selectedChapter?.id || null });
+      setBrief({
+        ...data,
+        skill: settings.skill,
+        level: settings.level,
+        time: settings.time,
+        retryTopic,
+        chapterIds: activeChapterIds,
+      });
       setPhase("brief");
     } catch {
       setPhase("idle");
@@ -393,7 +519,8 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
         time: brief.time,
         score: data.score,
         retryOf: brief.retryTopic || null,
-        chapterId: selectedChapterId || null,
+        chapterIds: brief.chapterIds || selectedChapterIds,
+        chapterId: (brief.chapterIds || selectedChapterIds)[0] || null,
       };
       const newSessions = [newSession, ...sessions];
       setSessions(newSessions);
@@ -407,39 +534,40 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
     }
   };
 
-  const handleImageUpload = async (file) => {
-    if (!file) return;
+  const handleImageUploadBatch = async (fileList) => {
+    const files = Array.from(fileList || []).filter((file) => file?.type?.startsWith("image/"));
+    if (!files.length) return;
+    if (!librarySelectedChapterId) {
+      setLibraryError("Select a chapter before uploading files.");
+      return;
+    }
     setLibraryError("");
     setLibraryBusy(true);
     try {
-      const extracted = await extractVocab(file);
-      setDraftChapterName(extracted.detectedTitle || "");
-      setDraftVocab(extracted.vocab.map(v => ({ word: v.word || "", translation: v.translation || "" })));
+      const extractedRows = [];
+      let failed = 0;
+      for (const file of files) {
+        try {
+          const extracted = await extractVocab(file);
+          extractedRows.push(...toCleanVocabPairs(extracted.vocab));
+        } catch {
+          failed += 1;
+        }
+      }
+      if (extractedRows.length > 0) {
+        setDraftVocab((prev) => mergeUniqueVocab(prev, extractedRows));
+        setDraftFileCount((prev) => prev + (files.length - failed));
+      }
+      if (extractedRows.length === 0) {
+        setLibraryError("Could not extract vocabulary from the selected images. Please try clearer photos.");
+      } else if (failed > 0) {
+        setLibraryError(`Processed ${files.length - failed} file(s). ${failed} file(s) failed.`);
+      }
     } catch {
       setLibraryError("Could not extract vocabulary from image. Please try a clearer photo.");
     } finally {
       setLibraryBusy(false);
     }
-  };
-
-  const saveDraftChapter = () => {
-    const cleanedVocab = draftVocab
-      .map(v => ({ word: v.word.trim(), translation: v.translation.trim() }))
-      .filter(v => v.word && v.translation);
-    const finalName = draftChapterName.trim() || `Chapter ${chapters.length + 1}`;
-    if (!cleanedVocab.length) {
-      setLibraryError("Please provide at least one valid word + translation pair.");
-      return;
-    }
-    saveChapter({
-      id: Date.now().toString(),
-      name: finalName,
-      vocab: cleanedVocab,
-      createdAt: new Date().toISOString(),
-    });
-    setDraftChapterName("");
-    setDraftVocab([]);
-    setLibraryError("");
   };
 
   const handleAuth = async (mode) => {
@@ -474,6 +602,14 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
   };
 
   const reset = () => { setPhase("idle"); setBrief(null); setFeedback(null); setTranscription(""); };
+  const getChapterNamesForSession = (session) => {
+    const ids = Array.isArray(session.chapterIds)
+      ? session.chapterIds
+      : (session.chapterId ? [session.chapterId] : []);
+    return ids
+      .map((id) => chapters.find((chapter) => chapter.id === id)?.name)
+      .filter(Boolean);
+  };
 
   const HomeView = () => (
     <div className="page">
@@ -494,12 +630,7 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
         <>
           <div className="card">
             <p className="section-label">Skill focus</p>
-            <div className="chip-group">
-              {SKILL_OPTIONS.map(s => (
-                <button key={s} className={`chip ${settings.skill===s?"active":""}`}
-                  onClick={() => updateSettings({...settings, skill:s})}>{s}</button>
-              ))}
-            </div>
+            <div className="chip-group"><span className="chip active">Writing</span></div>
             <p className="section-label">Time available</p>
             <div className="chip-group">
               {TIME_OPTIONS.map(t => (
@@ -507,15 +638,22 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
                   onClick={() => updateSettings({...settings, time:t.value})}>{t.label}</button>
               ))}
             </div>
-            {chapters.length > 0 && (
-              <>
-                <p className="section-label">Chapter</p>
-                <select className="select" value={selectedChapterId} onChange={(e) => setSelectedChapterId(e.target.value)}>
-                  <option value="">Random (no chapter)</option>
-                  {chapters.map(ch => <option key={ch.id} value={ch.id}>{ch.name}</option>)}
-                </select>
-              </>
-            )}
+            <p className="section-label">Chapters (choose one or more)</p>
+            <div className="chip-group">
+              {chapters.map((chapter) => (
+                <button
+                  key={chapter.id}
+                  className={`chip ${selectedChapterIds.includes(chapter.id) ? "active" : ""}`}
+                  onClick={() => setSelectedChapterIds((prev) => (
+                    prev.includes(chapter.id)
+                      ? prev.filter((id) => id !== chapter.id)
+                      : [...prev, chapter.id]
+                  ))}
+                >
+                  {chapter.order}. {chapter.name}
+                </button>
+              ))}
+            </div>
           </div>
           <button className="btn btn-primary" onClick={() => generateBrief()}>✦ Start Session</button>
         </>
@@ -671,6 +809,9 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
                     <span className="meta-tag">{s.level}</span>
                     <span className="meta-tag">{s.skill}</span>
                     <span className="meta-tag">{s.time} min</span>
+                    {getChapterNamesForSession(s).map((name) => (
+                      <span key={`${s.id}-${name}`} className="meta-tag" style={{background:"#FFF0E8",color:"var(--terracotta)"}}>{name}</span>
+                    ))}
                   </div>
                 </div>
               ))}
@@ -683,7 +824,7 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
 
   const HistoryView = () => {
     if (viewSession) {
-      const chapterName = chapters.find(c => c.id === viewSession.chapterId)?.name;
+      const chapterNames = getChapterNamesForSession(viewSession);
       return (
         <div className="page">
           <button className="btn btn-ghost btn-sm" style={{marginBottom:14,width:"auto"}}
@@ -694,7 +835,9 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
             <span className="meta-tag">{viewSession.skill}</span>
             <span className="meta-tag">{viewSession.time} min</span>
             <span className="meta-tag">{new Date(viewSession.date).toLocaleDateString("en-GB")}</span>
-            {chapterName && <span className="meta-tag" style={{background:"#FFF0E8",color:"var(--terracotta)"}}>{chapterName}</span>}
+            {chapterNames.map((name) => (
+              <span key={name} className="meta-tag" style={{background:"#FFF0E8",color:"var(--terracotta)"}}>{name}</span>
+            ))}
           </div>
           <div className="score-circle">
             <span className="score-number">{viewSession.score}</span>
@@ -723,7 +866,15 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
             </div>
           )}
           <button className="btn btn-primary" style={{marginTop:6}}
-            onClick={() => { setViewSession(null); generateBrief(viewSession.topic); setTab("home"); }}>
+            onClick={() => {
+              const chapterIds = Array.isArray(viewSession.chapterIds)
+                ? viewSession.chapterIds
+                : (viewSession.chapterId ? [viewSession.chapterId] : []);
+              setSelectedChapterIds(chapterIds);
+              setViewSession(null);
+              generateBrief(viewSession.topic, chapterIds);
+              setTab("home");
+            }}>
             ↺ Retry this topic
           </button>
         </div>
@@ -740,7 +891,7 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
             <p>Complete your first session and it will appear here.</p>
           </div>
         ) : sessions.map(s => {
-          const chapterName = chapters.find(c => c.id === s.chapterId)?.name;
+          const chapterNames = getChapterNamesForSession(s);
           return (
             <div key={s.id} className="session-card" onClick={() => setViewSession(s)}>
               <div className="session-card-header">
@@ -753,7 +904,9 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
                 <span className="meta-tag">{s.time} min</span>
                 <span className="meta-tag">{new Date(s.date).toLocaleDateString("en-GB")}</span>
                 {s.retryOf && <span className="meta-tag" style={{background:"#FFF0E8",color:"var(--terracotta)"}}>retry</span>}
-                {chapterName && <span className="meta-tag" style={{background:"#FFF0E8",color:"var(--terracotta)"}}>{chapterName}</span>}
+                {chapterNames.map((name) => (
+                  <span key={`${s.id}-${name}`} className="meta-tag" style={{background:"#FFF0E8",color:"var(--terracotta)"}}>{name}</span>
+                ))}
               </div>
             </div>
           );
@@ -764,84 +917,94 @@ Use Castilian standards. Score: 90+ excellent, 75-89 good, 60-74 fair, <60 needs
 
   const LibraryView = () => (
     <div className="page">
-      <p className="section-label" style={{marginBottom:6}}>Workbook upload</p>
-      <div className="card">
+      <p className="section-label" style={{marginBottom:6}}>Workbook chapters</p>
+      {chapters.map((ch) => (
         <div
-          className={`dropzone ${isDragOver ? "drag" : ""}`}
-          onClick={() => fileInputRef.current?.click()}
-          onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
-          onDragLeave={() => setIsDragOver(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setIsDragOver(false);
-            handleImageUpload(e.dataTransfer.files?.[0]);
-          }}
+          key={ch.id}
+          className="chapter-card"
+          style={librarySelectedChapterId === ch.id ? { borderColor:"var(--terracotta)", background:"#FFF7F2" } : {}}
         >
-          <p style={{fontSize:22, marginBottom:6}}>🖼️</p>
-          <p>Drop workbook photo here, or tap to upload.</p>
-        </div>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*"
-          style={{display:"none"}}
-          onChange={(e) => handleImageUpload(e.target.files?.[0])}
-        />
-
-        {libraryBusy && <div className="loading" style={{padding:"20px 0"}}><div className="spinner"/><p className="loading-text">Extracting vocabulary…</p></div>}
-        {libraryError && <p style={{fontSize:12, color:"var(--error)", marginBottom:8}}>{libraryError}</p>}
-
-        {draftVocab.length > 0 && (
-          <>
-            <p className="section-label" style={{marginTop:6}}>Chapter name</p>
-            <input className="text-input" value={draftChapterName} placeholder="Chapter 3 — El mercado" onChange={(e) => setDraftChapterName(e.target.value)} />
-
-            <p className="section-label" style={{marginTop:10}}>Review vocabulary</p>
-            <table className="vocab-table">
-              <thead>
-                <tr><th>Spanish</th><th>English</th><th/></tr>
-              </thead>
-              <tbody>
-                {draftVocab.map((item, i) => (
-                  <tr key={i}>
-                    <td><input className="table-input" value={item.word} onChange={(e) => {
-                      const next = [...draftVocab];
-                      next[i] = { ...next[i], word: e.target.value };
-                      setDraftVocab(next);
-                    }} /></td>
-                    <td><input className="table-input" value={item.translation} onChange={(e) => {
-                      const next = [...draftVocab];
-                      next[i] = { ...next[i], translation: e.target.value };
-                      setDraftVocab(next);
-                    }} /></td>
-                    <td><button className="btn btn-ghost btn-sm" onClick={() => setDraftVocab(draftVocab.filter((_, idx) => idx !== i))}>Delete</button></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div style={{display:"flex", gap:8, marginTop:10}}>
-              <button className="btn btn-secondary btn-sm" onClick={() => setDraftVocab([...draftVocab, { word:"", translation:"" }])}>+ Add row</button>
-              <button className="btn btn-primary btn-sm" onClick={saveDraftChapter}>Save chapter</button>
-            </div>
-          </>
-        )}
-      </div>
-
-      <p className="section-label" style={{marginBottom:6}}>Saved chapters</p>
-      {chapters.length === 0 ? (
-        <div className="empty-state" style={{padding:"20px 10px"}}>
-          <p className="empty-icon" style={{fontSize:24}}>📚</p>
-          <p>No chapter uploads yet.</p>
-        </div>
-      ) : chapters.map(ch => (
-        <div key={ch.id} className="chapter-card">
           <div>
-            <p className="chapter-name">{ch.name}</p>
-            <p className="chapter-meta">{ch.vocab.length} vocabulary pairs</p>
+            <p className="chapter-name">{ch.order}. {ch.name}</p>
+            <p className="chapter-meta">{ch.vocab.length} vocabulary pairs · {ch.filesUploaded} file(s)</p>
           </div>
-          <button className="btn btn-ghost btn-sm" onClick={() => deleteChapter(ch.id)}>Delete</button>
+          <div style={{display:"flex", gap:8}}>
+            <button className="btn btn-secondary btn-sm" onClick={() => {
+              setLibrarySelectedChapterId(ch.id);
+              setDraftVocab([]);
+              setDraftFileCount(0);
+              setLibraryError("");
+            }}>Select</button>
+            {ch.vocab.length > 0 && <button className="btn btn-ghost btn-sm" onClick={() => clearChapterData(ch.id)}>Clear</button>}
+          </div>
         </div>
       ))}
+
+      {librarySelectedChapterId && (
+        <div className="card">
+          <p className="section-label" style={{marginBottom:6}}>Upload to chapter</p>
+          <p className="card-sub">
+            {chapters.find((chapter) => chapter.id === librarySelectedChapterId)?.name}
+          </p>
+          <div
+            className={`dropzone ${isDragOver ? "drag" : ""}`}
+            onClick={() => fileInputRef.current?.click()}
+            onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
+            onDragLeave={() => setIsDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setIsDragOver(false);
+              handleImageUploadBatch(e.dataTransfer.files);
+            }}
+          >
+            <p style={{fontSize:22, marginBottom:6}}>🖼️</p>
+            <p>Drop one or multiple workbook photos, or tap to upload.</p>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{display:"none"}}
+            onChange={(e) => handleImageUploadBatch(e.target.files)}
+          />
+
+          {libraryBusy && <div className="loading" style={{padding:"20px 0"}}><div className="spinner"/><p className="loading-text">Extracting vocabulary…</p></div>}
+          {libraryError && <p style={{fontSize:12, color:"var(--error)", marginBottom:8}}>{libraryError}</p>}
+
+          {draftVocab.length > 0 && (
+            <>
+              <p className="section-label" style={{marginTop:10}}>Review vocabulary</p>
+              <table className="vocab-table">
+                <thead>
+                  <tr><th>Spanish</th><th>English</th><th/></tr>
+                </thead>
+                <tbody>
+                  {draftVocab.map((item, i) => (
+                    <tr key={i}>
+                      <td><input className="table-input" value={item.word} onChange={(e) => {
+                        const next = [...draftVocab];
+                        next[i] = { ...next[i], word: e.target.value };
+                        setDraftVocab(next);
+                      }} /></td>
+                      <td><input className="table-input" value={item.translation} onChange={(e) => {
+                        const next = [...draftVocab];
+                        next[i] = { ...next[i], translation: e.target.value };
+                        setDraftVocab(next);
+                      }} /></td>
+                      <td><button className="btn btn-ghost btn-sm" onClick={() => setDraftVocab(draftVocab.filter((_, idx) => idx !== i))}>Delete</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{display:"flex", gap:8, marginTop:10}}>
+                <button className="btn btn-secondary btn-sm" onClick={() => setDraftVocab([...draftVocab, { word:"", translation:"" }])}>+ Add row</button>
+                <button className="btn btn-primary btn-sm" onClick={saveDraftToChapter}>Save to chapter</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 

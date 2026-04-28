@@ -447,9 +447,12 @@ export default function HablaApp() {
     const system = `Je bent een Castiliaans-Spaanse docent (Spanje). Gebruik altijd vosotros, Peninsulaire woordenschat en leísmo waar natuurlijk. Gebruik nooit Latijns-Amerikaanse varianten. Antwoord ALLEEN met geldige JSON, zonder markdown.`;
     const vocabCount = settings.time === 5 ? 4 : settings.time === 15 ? 7 : 10;
     const grammarCount = settings.time === 5 ? 1 : 2;
+    const chapterWordSet = new Set(
+      selectedChapters.flatMap((chapter) => chapter.vocab.map((item) => String(item.word || "").trim().toLowerCase()))
+    );
 
     const chapterCtx = selectedChapters.length
-      ? `\n\nDeze sessie moet de volgende werkboekhoofdstukken gebruiken: ${selectedChapters.map((c) => `"${c.name}"`).join(", ")}.\nJe MOET de oefening opbouwen met ALLEEN de volgende woordenschat. Introduceer geen woorden, zinnen of thema's buiten deze lijst:\n\n${selectedChapters.flatMap((chapter) => chapter.vocab.map((v) => `- ${v.word}: ${v.translation}`)).join("\n")}\n\nKies een realistisch scenario waarin deze woorden natuurlijk voorkomen. Het veld "vocab" in je JSON-antwoord moet uitsluitend uit bovenstaande lijst komen (kies de meest relevante subset).`
+      ? `\n\nDeze sessie moet de volgende werkboekhoofdstukken gebruiken: ${selectedChapters.map((c) => `"${c.name}"`).join(", ")}.\nGebruik deze woordenschat als basis:\n\n${selectedChapters.flatMap((chapter) => chapter.vocab.map((v) => `- ${v.word}: ${v.translation}`)).join("\n")}\n\nMaak een splitsing in je JSON-antwoord:\n- "requiredVocab": exact 5 woorden uit bovenstaande lijst die verplicht in de tekst gebruikt moeten worden.\n- "supportVocab": exact 5 extra woorden die nuttig zijn voor dit onderwerp, maar NIET in bovenstaande lijst staan.\nGebruik in "type" respectievelijk "verplicht" en "handig".`
       : "";
 
     const prompt = `Genereer een ${settings.time}-minuten ${settings.skill.toLowerCase()}-oefening voor ${settings.level}.
@@ -459,16 +462,25 @@ Geef JSON terug:
 {
   "topic": "short title",
   "prompt": "oefenopdracht in het Nederlands",
-  "vocab": [{"word":"","translation":"","type":""}],
+  "requiredVocab": [{"word":"","translation":"","type":"verplicht"}],
+  "supportVocab": [{"word":"","translation":"","type":"handig"}],
   "grammar": [{"rule":"","explanation":"","example":""}]
 }
-${vocabCount} vocab-items, ${grammarCount} grammaticaregel(s). Maak de opdracht realistisch en gesitueerd in een Spaans-sprekend land.${chapterCtx}`;
+${selectedChapters.length ? "Gebruik exact 5 requiredVocab-items en exact 5 supportVocab-items." : `${vocabCount} vocab-items verdeeld over requiredVocab en supportVocab.`} ${grammarCount} grammaticaregel(s). Maak de opdracht realistisch en gesitueerd in een Spaans-sprekend land.${chapterCtx}`;
 
     try {
       const raw = await callLLM([{ role:"user", content:prompt }], system);
       const data = JSON.parse(raw.replace(/```json|```/g,"").trim());
+      const requiredVocab = Array.isArray(data.requiredVocab) ? data.requiredVocab : [];
+      const supportVocabRaw = Array.isArray(data.supportVocab) ? data.supportVocab : [];
+      const fallbackVocab = Array.isArray(data.vocab) ? data.vocab : [];
+      const supportVocab = selectedChapters.length
+        ? supportVocabRaw.filter((item) => !chapterWordSet.has(String(item?.word || "").trim().toLowerCase()))
+        : supportVocabRaw;
       setBrief({
         ...data,
+        requiredVocab: requiredVocab.length ? requiredVocab : fallbackVocab.slice(0, selectedChapters.length ? 5 : vocabCount),
+        supportVocab: supportVocab.length ? supportVocab : fallbackVocab.slice(selectedChapters.length ? 5 : Math.ceil(vocabCount / 2)),
         skill: settings.skill,
         level: settings.level,
         time: settings.time,
@@ -700,8 +712,17 @@ Gebruik Castiliaanse standaarden. Score: 90+ uitstekend, 75-89 goed, 60-74 redel
             </div>
           ))}
           <div className="card">
-            <p className="section-label">Belangrijke woordenschat</p>
-            {brief.vocab?.map((v,i) => (
+            <p className="section-label">Verplichte woorden (uit woordenlijst)</p>
+            {brief.requiredVocab?.map((v,i) => (
+              <div className="vocab-item" key={i}>
+                <div><p className="vocab-word">{v.word}</p><p className="vocab-type">{v.type}</p></div>
+                <p className="vocab-translation">{v.translation}</p>
+              </div>
+            ))}
+          </div>
+          <div className="card">
+            <p className="section-label">Handige extra woorden (niet in woordenlijst)</p>
+            {brief.supportVocab?.map((v,i) => (
               <div className="vocab-item" key={i}>
                 <div><p className="vocab-word">{v.word}</p><p className="vocab-type">{v.type}</p></div>
                 <p className="vocab-translation">{v.translation}</p>

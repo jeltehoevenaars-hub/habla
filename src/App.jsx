@@ -121,31 +121,6 @@ const TIME_OPTIONS = [{ label:"5 min", value:5 },{ label:"15 min", value:15 },{ 
 const DAYS = ["Mo","Tu","We","Th","Fr","Sa","Su"];
 const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const DEFAULT_SETTINGS = { level:"B1", skill:"Schrijven", time:15 };
-const WORKBOOK_CHAPTER_NAMES = [
-  "Bienvenidos al mundo español",
-  "Primeros encuentros",
-  "La familia española",
-  "Datos personales",
-  "Un día cotidiano",
-  "De viaje",
-  "Hemos llegado en el hotel",
-  "Vamos de compras",
-  "¿La carta, por favor?",
-  "Me duele la cabeza",
-  "¿Dígame? La llamada telefónica y el correa electrónico",
-  "Internet y medios sociales",
-  "Deporte, aficiones y sueños",
-  "Hablar del pasado",
-  "Dímelo",
-  "En la oficina",
-];
-const WORKBOOK_CHAPTERS = WORKBOOK_CHAPTER_NAMES.map((name, idx) => ({
-  id: `chapter-${idx + 1}`,
-  order: idx + 1,
-  name,
-  vocab: [],
-  filesUploaded: 0,
-}));
 
 const STORAGE_KEY = "habla_v1";
 const CLOUD_TABLE = "user_state";
@@ -220,28 +195,23 @@ const normalizeSettings = (raw) => ({
 });
 
 const normalizeChapters = (raw = []) => {
-  const byId = new Map(WORKBOOK_CHAPTERS.map((chapter) => [chapter.id, { ...chapter }]));
-  const byName = new Map(WORKBOOK_CHAPTERS.map((chapter) => [chapter.name.toLowerCase(), chapter.id]));
-  if (!Array.isArray(raw)) return Array.from(byId.values());
-  raw.forEach((chapter) => {
-    const incomingName = String(chapter?.name || "").trim();
-    const mappedId = byId.has(chapter?.id) ? chapter.id : byName.get(incomingName.toLowerCase());
-    if (!mappedId) return;
-    const target = byId.get(mappedId);
-    target.vocab = mergeUniqueVocab(target.vocab, chapter?.vocab || []);
-    target.filesUploaded += Number(chapter?.filesUploaded || 0) || (Array.isArray(chapter?.vocab) && chapter.vocab.length > 0 ? 1 : 0);
-    byId.set(mappedId, target);
-  });
-  return Array.from(byId.values());
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((chapter) => ({
+      id: String(chapter?.id || "").trim(),
+      name: String(chapter?.name || "").trim(),
+      vocab: Array.isArray(chapter?.vocab) ? chapter.vocab : [],
+      filesUploaded: Number(chapter?.filesUploaded || 0),
+    }))
+    .filter((chapter) => chapter.id && chapter.name);
 };
 
 const normalizeSessions = (raw = []) => {
-  const validChapterIds = new Set(WORKBOOK_CHAPTERS.map((c) => c.id));
   if (!Array.isArray(raw)) return [];
   return raw.map((session) => {
     const chapterIds = Array.isArray(session.chapterIds)
-      ? session.chapterIds.filter((id) => validChapterIds.has(id))
-      : (validChapterIds.has(session.chapterId) ? [session.chapterId] : []);
+      ? session.chapterIds
+      : (session.chapterId ? [session.chapterId] : []);
     return {
       ...session,
       skill: "Schrijven",
@@ -255,7 +225,7 @@ export default function HablaApp() {
   const [tab, setTab] = useState("home");
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [sessions, setSessions] = useState([]);
-  const [chapters, setChapters] = useState(WORKBOOK_CHAPTERS);
+  const [chapters, setChapters] = useState([]);
   const [selectedChapterIds, setSelectedChapterIds] = useState([]);
   const [streak, setStreak] = useState(0);
   const [grammarWeaknesses, setGrammarWeaknesses] = useState([]);
@@ -284,6 +254,11 @@ export default function HablaApp() {
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState("");
   const [lastSyncAt, setLastSyncAt] = useState("");
+  const [showNewChapterInput, setShowNewChapterInput] = useState(false);
+  const [newChapterName, setNewChapterName] = useState("");
+  const [renamingChapterId, setRenamingChapterId] = useState(null);
+  const [renameName, setRenameName] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const fileInputRef = useRef(null);
   const hasHydrated = useRef(false);
 
@@ -321,7 +296,7 @@ export default function HablaApp() {
   const persist = useCallback(async (newSessions, newSettings, newWeaknesses, newChapters, options = {}) => {
     const payload = buildPayload(newSessions, newSettings, newWeaknesses, newChapters);
     saveStore(payload);
-    if (!supabase || !user) return;
+    if (!supabase || !user || options.localOnly) return;
     if (options.silent !== true) setSyncBusy(true);
     setSyncError("");
     const { error } = await supabase.from(CLOUD_TABLE).upsert({
@@ -423,10 +398,30 @@ export default function HablaApp() {
     setLibraryError("");
   };
 
-  const clearChapterData = (id) => {
-    const newChapters = chapters.map((chapter) => (
-      chapter.id === id ? { ...chapter, vocab: [], filesUploaded: 0 } : chapter
-    ));
+  const addChapter = (name) => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const id = (typeof crypto !== "undefined" && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString();
+    const newChapters = [...chapters, { id, name: trimmed, vocab: [], filesUploaded: 0 }];
+    setChapters(newChapters);
+    persist(sessions, settings, grammarWeaknesses, newChapters);
+  };
+
+  const deleteChapter = (id) => {
+    const newChapters = chapters.filter((c) => c.id !== id);
+    setChapters(newChapters);
+    persist(sessions, settings, grammarWeaknesses, newChapters);
+    if (librarySelectedChapterId === id) {
+      setLibrarySelectedChapterId("");
+      setDraftVocab([]);
+      setDraftFileCount(0);
+    }
+  };
+
+  const renameChapter = (id, newName) => {
+    const trimmed = newName.trim();
+    if (!trimmed) return;
+    const newChapters = chapters.map((c) => c.id === id ? { ...c, name: trimmed } : c);
     setChapters(newChapters);
     persist(sessions, settings, grammarWeaknesses, newChapters);
   };
@@ -655,8 +650,8 @@ Gebruik Castiliaanse standaarden. Score: 90+ uitstekend, 75-89 goed, 60-74 redel
             <div style={{display:"grid", gap:8}}>
               <select className="select" value={homeChapterPickerId} onChange={(e) => setHomeChapterPickerId(e.target.value)}>
                 <option value="">Kies een hoofdstuk</option>
-                {chapters.map((chapter) => (
-                  <option key={chapter.id} value={chapter.id}>{chapter.order}. {chapter.name}</option>
+                {[...chapters].sort((a, b) => a.name.localeCompare(b.name)).map((chapter) => (
+                  <option key={chapter.id} value={chapter.id}>{chapter.name}</option>
                 ))}
               </select>
               <button
@@ -685,7 +680,7 @@ Gebruik Castiliaanse standaarden. Score: 90+ uitstekend, 75-89 goed, 60-74 redel
                     className="chip active"
                     onClick={() => setSelectedChapterIds((prev) => prev.filter((chapterId) => chapterId !== chapter.id))}
                   >
-                    {chapter.order}. {chapter.name} ×
+                    {chapter.name} ×
                   </button>
                 );
               })}
@@ -961,8 +956,13 @@ Gebruik Castiliaanse standaarden. Score: 90+ uitstekend, 75-89 goed, 60-74 redel
   };
 
   const LibraryView = () => {
+    const sortedChapters = [...chapters].sort((a, b) => a.name.localeCompare(b.name));
     const activeChapter = chapters.find((chapter) => chapter.id === librarySelectedChapterId);
+
     if (activeChapter) {
+      const isRenamingDetail = renamingChapterId === activeChapter.id;
+      const isConfirmingDeleteDetail = confirmDeleteId === activeChapter.id;
+
       return (
         <div className="page">
           <button className="btn btn-ghost btn-sm" style={{marginBottom:10, width:"auto"}} onClick={() => {
@@ -970,11 +970,48 @@ Gebruik Castiliaanse standaarden. Score: 90+ uitstekend, 75-89 goed, 60-74 redel
             setDraftVocab([]);
             setDraftFileCount(0);
             setLibraryError("");
+            setRenamingChapterId(null);
+            setConfirmDeleteId(null);
           }}>
             ← Terug naar hoofdstukken
           </button>
-          <h2 style={{fontFamily:"'Playfair Display',serif", fontSize:18, marginBottom:4}}>{activeChapter.order}. {activeChapter.name}</h2>
-          <p className="card-sub">{activeChapter.vocab.length} woordparen · {activeChapter.filesUploaded} bestand(en) geüpload</p>
+
+          <div style={{display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:10}}>
+            <div style={{flex:1, marginRight:10}}>
+              {isRenamingDetail ? (
+                <div style={{display:"flex", gap:6, flexWrap:"wrap"}}>
+                  <input
+                    className="text-input"
+                    style={{flex:1, minWidth:0}}
+                    value={renameName}
+                    onChange={(e) => setRenameName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { renameChapter(activeChapter.id, renameName); setRenamingChapterId(null); }
+                      else if (e.key === "Escape") setRenamingChapterId(null);
+                    }}
+                    autoFocus
+                  />
+                  <button className="btn btn-primary btn-sm" onClick={() => { renameChapter(activeChapter.id, renameName); setRenamingChapterId(null); }}>Opslaan</button>
+                  <button className="btn btn-ghost btn-sm" onClick={() => setRenamingChapterId(null)}>Annuleer</button>
+                </div>
+              ) : (
+                <div style={{display:"flex", alignItems:"center", gap:8}}>
+                  <h2 style={{fontFamily:"'Playfair Display',serif", fontSize:18}}>{activeChapter.name}</h2>
+                  <button style={{background:"none",border:"none",cursor:"pointer",color:"var(--muted)",fontSize:14,padding:"2px 4px"}} title="Naam wijzigen" onClick={() => { setRenamingChapterId(activeChapter.id); setRenameName(activeChapter.name); }}>✏</button>
+                </div>
+              )}
+              <p className="card-sub" style={{marginTop:4}}>{activeChapter.vocab.length} woordparen · {activeChapter.filesUploaded} bestand(en) geüpload</p>
+            </div>
+            {isConfirmingDeleteDetail ? (
+              <div style={{display:"flex", gap:6, alignItems:"center", flexShrink:0}}>
+                <span style={{fontSize:12, color:"var(--muted)"}}>Zeker weten?</span>
+                <button className="btn btn-ghost btn-sm" style={{color:"var(--error)", borderColor:"var(--error)"}} onClick={() => { deleteChapter(activeChapter.id); setConfirmDeleteId(null); }}>Ja</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => setConfirmDeleteId(null)}>Nee</button>
+              </div>
+            ) : (
+              <button className="btn btn-ghost btn-sm" style={{flexShrink:0, color:"var(--error)", borderColor:"var(--error)"}} onClick={() => setConfirmDeleteId(activeChapter.id)}>Verwijder</button>
+            )}
+          </div>
 
           <div className="card">
             <p className="section-label" style={{marginBottom:6}}>Bestanden uploaden</p>
@@ -983,23 +1020,12 @@ Gebruik Castiliaanse standaarden. Score: 90+ uitstekend, 75-89 goed, 60-74 redel
               onClick={() => fileInputRef.current?.click()}
               onDragOver={(e) => { e.preventDefault(); setIsDragOver(true); }}
               onDragLeave={() => setIsDragOver(false)}
-              onDrop={(e) => {
-                e.preventDefault();
-                setIsDragOver(false);
-                handleImageUploadBatch(e.dataTransfer.files);
-              }}
+              onDrop={(e) => { e.preventDefault(); setIsDragOver(false); handleImageUploadBatch(e.dataTransfer.files); }}
             >
               <p style={{fontSize:22, marginBottom:6}}>🖼️</p>
               <p>Sleep één of meerdere werkboekfoto's hierheen, of tik om te uploaden.</p>
             </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              multiple
-              style={{display:"none"}}
-              onChange={(e) => handleImageUploadBatch(e.target.files)}
-            />
+            <input ref={fileInputRef} type="file" accept="image/*" multiple style={{display:"none"}} onChange={(e) => handleImageUploadBatch(e.target.files)} />
 
             {libraryBusy && <div className="loading" style={{padding:"20px 0"}}><div className="spinner"/><p className="loading-text">Woordenschat wordt geëxtraheerd…</p></div>}
             {libraryError && <p style={{fontSize:12, color:"var(--error)", marginBottom:8}}>{libraryError}</p>}
@@ -1008,23 +1034,13 @@ Gebruik Castiliaanse standaarden. Score: 90+ uitstekend, 75-89 goed, 60-74 redel
               <>
                 <p className="section-label" style={{marginTop:10}}>Nieuwe woordenschat uit upload</p>
                 <table className="vocab-table">
-                  <thead>
-                    <tr><th>Spaans</th><th>Nederlands</th><th/></tr>
-                  </thead>
+                  <thead><tr><th>Spaans</th><th>Nederlands</th><th/></tr></thead>
                   <tbody>
                     {draftVocab.map((item, i) => (
                       <tr key={i}>
-                        <td><input className="table-input" value={item.word} onChange={(e) => {
-                          const next = [...draftVocab];
-                          next[i] = { ...next[i], word: e.target.value };
-                          setDraftVocab(next);
-                        }} /></td>
-                        <td><input className="table-input" value={item.translation} onChange={(e) => {
-                          const next = [...draftVocab];
-                          next[i] = { ...next[i], translation: e.target.value };
-                          setDraftVocab(next);
-                        }} /></td>
-                        <td><button className="btn btn-ghost btn-sm" onClick={() => setDraftVocab(draftVocab.filter((_, idx) => idx !== i))}>Verwijder</button></td>
+                        <td><input className="table-input" value={item.word} onChange={(e) => { const next = [...draftVocab]; next[i] = { ...next[i], word: e.target.value }; setDraftVocab(next); }} /></td>
+                        <td><input className="table-input" value={item.translation} onChange={(e) => { const next = [...draftVocab]; next[i] = { ...next[i], translation: e.target.value }; setDraftVocab(next); }} /></td>
+                        <td><button className="btn btn-ghost btn-sm" style={{padding:"5px 8px"}} onClick={() => setDraftVocab(draftVocab.filter((_, idx) => idx !== i))}>×</button></td>
                       </tr>
                     ))}
                   </tbody>
@@ -1038,25 +1054,58 @@ Gebruik Castiliaanse standaarden. Score: 90+ uitstekend, 75-89 goed, 60-74 redel
           </div>
 
           <div className="card">
-            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:6}}>
-              <p className="section-label" style={{marginBottom:0}}>Bestaande woordenschat</p>
-              {activeChapter.vocab.length > 0 && <button className="btn btn-ghost btn-sm" onClick={() => clearChapterData(activeChapter.id)}>Leeg hoofdstuk</button>}
-            </div>
+            <p className="section-label" style={{marginBottom:6}}>Woordenschat</p>
             {activeChapter.vocab.length === 0 ? (
-              <p className="card-sub" style={{marginBottom:0}}>Nog geen woordenschat opgeslagen voor dit hoofdstuk.</p>
+              <p className="card-sub" style={{marginBottom:8}}>Nog geen woordenschat opgeslagen voor dit hoofdstuk.</p>
             ) : (
               <table className="vocab-table">
-                <thead><tr><th>Spaans</th><th>Nederlands</th></tr></thead>
+                <thead><tr><th>Spaans</th><th>Nederlands</th><th/></tr></thead>
                 <tbody>
-                  {activeChapter.vocab.map((item, idx) => (
-                    <tr key={`${item.word}-${item.translation}-${idx}`}>
-                      <td>{item.word}</td>
-                      <td>{item.translation}</td>
+                  {activeChapter.vocab.map((item, rowIdx) => (
+                    <tr key={rowIdx}>
+                      <td>
+                        <input
+                          className="table-input"
+                          value={item.word}
+                          onChange={(e) => {
+                            const newVocab = activeChapter.vocab.map((v, i) => i === rowIdx ? { ...v, word: e.target.value } : v);
+                            const newChapters = chapters.map((c) => c.id === activeChapter.id ? { ...c, vocab: newVocab } : c);
+                            setChapters(newChapters);
+                            persist(sessions, settings, grammarWeaknesses, newChapters, { localOnly: true });
+                          }}
+                        />
+                      </td>
+                      <td>
+                        <input
+                          className="table-input"
+                          value={item.translation}
+                          onChange={(e) => {
+                            const newVocab = activeChapter.vocab.map((v, i) => i === rowIdx ? { ...v, translation: e.target.value } : v);
+                            const newChapters = chapters.map((c) => c.id === activeChapter.id ? { ...c, vocab: newVocab } : c);
+                            setChapters(newChapters);
+                            persist(sessions, settings, grammarWeaknesses, newChapters, { localOnly: true });
+                          }}
+                        />
+                      </td>
+                      <td>
+                        <button className="btn btn-ghost btn-sm" style={{padding:"5px 8px"}} onClick={() => {
+                          const newVocab = activeChapter.vocab.filter((_, i) => i !== rowIdx);
+                          const newChapters = chapters.map((c) => c.id === activeChapter.id ? { ...c, vocab: newVocab } : c);
+                          setChapters(newChapters);
+                          persist(sessions, settings, grammarWeaknesses, newChapters);
+                        }}>×</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             )}
+            <button className="btn btn-secondary btn-sm" style={{marginTop:8}} onClick={() => {
+              const newVocab = [...activeChapter.vocab, { word: "", translation: "" }];
+              const newChapters = chapters.map((c) => c.id === activeChapter.id ? { ...c, vocab: newVocab } : c);
+              setChapters(newChapters);
+              persist(sessions, settings, grammarWeaknesses, newChapters);
+            }}>+ Rij toevoegen</button>
           </div>
         </div>
       );
@@ -1064,21 +1113,88 @@ Gebruik Castiliaanse standaarden. Score: 90+ uitstekend, 75-89 goed, 60-74 redel
 
     return (
       <div className="page">
-        <p className="section-label" style={{marginBottom:6}}>Werkboekhoofdstukken</p>
-        {chapters.map((ch) => (
-          <div key={ch.id} className="chapter-card">
-            <div>
-              <p className="chapter-name">{ch.order}. {ch.name}</p>
-              <p className="chapter-meta">{ch.vocab.length} woordparen · {ch.filesUploaded} bestand(en)</p>
+        <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:10}}>
+          <p className="section-label" style={{marginBottom:0}}>Bibliotheek</p>
+          <button className="btn btn-primary btn-sm" onClick={() => { setShowNewChapterInput(true); setNewChapterName(""); }}>+ Nieuw hoofdstuk</button>
+        </div>
+
+        {showNewChapterInput && (
+          <div className="card" style={{marginBottom:10}}>
+            <p className="section-label" style={{marginBottom:6}}>Naam van het nieuwe hoofdstuk</p>
+            <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+              <input
+                className="text-input"
+                style={{flex:1, minWidth:0}}
+                placeholder="Bijv. Vacances en Espagne"
+                value={newChapterName}
+                onChange={(e) => setNewChapterName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && newChapterName.trim()) { addChapter(newChapterName); setShowNewChapterInput(false); setNewChapterName(""); }
+                  else if (e.key === "Escape") setShowNewChapterInput(false);
+                }}
+                autoFocus
+              />
+              <button className="btn btn-primary btn-sm" disabled={!newChapterName.trim()} onClick={() => { addChapter(newChapterName); setShowNewChapterInput(false); setNewChapterName(""); }}>Aanmaken</button>
+              <button className="btn btn-ghost btn-sm" onClick={() => setShowNewChapterInput(false)}>Annuleer</button>
             </div>
-            <button className="btn btn-secondary btn-sm" onClick={() => {
-              setLibrarySelectedChapterId(ch.id);
-              setDraftVocab([]);
-              setDraftFileCount(0);
-              setLibraryError("");
-            }}>Openen</button>
           </div>
-        ))}
+        )}
+
+        {sortedChapters.length === 0 && !showNewChapterInput && (
+          <div className="empty-state">
+            <p className="empty-icon">📚</p>
+            <h3>Geen hoofdstukken</h3>
+            <p>Maak een nieuw hoofdstuk aan om woordenschat op te slaan.</p>
+          </div>
+        )}
+
+        {sortedChapters.map((ch) => {
+          const isRenamingThis = renamingChapterId === ch.id;
+          const isConfirmingDeleteThis = confirmDeleteId === ch.id;
+          return (
+            <div key={ch.id} className="chapter-card">
+              <div style={{flex:1, minWidth:0}}>
+                {isRenamingThis ? (
+                  <div style={{display:"flex", gap:6, alignItems:"center"}}>
+                    <input
+                      className="table-input"
+                      style={{flex:1, minWidth:0}}
+                      value={renameName}
+                      onChange={(e) => setRenameName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && renameName.trim()) { renameChapter(ch.id, renameName); setRenamingChapterId(null); }
+                        else if (e.key === "Escape") setRenamingChapterId(null);
+                      }}
+                      autoFocus
+                    />
+                    <button className="btn btn-primary btn-sm" style={{padding:"5px 8px"}} onClick={() => { renameChapter(ch.id, renameName); setRenamingChapterId(null); }}>✓</button>
+                    <button className="btn btn-ghost btn-sm" style={{padding:"5px 8px"}} onClick={() => setRenamingChapterId(null)}>✗</button>
+                  </div>
+                ) : (
+                  <p className="chapter-name">{ch.name}</p>
+                )}
+                <p className="chapter-meta">{ch.vocab.length} woordparen · {ch.filesUploaded} bestand(en)</p>
+              </div>
+              <div style={{display:"flex", gap:6, alignItems:"center", flexShrink:0}}>
+                {isConfirmingDeleteThis ? (
+                  <>
+                    <span style={{fontSize:11, color:"var(--muted)"}}>Zeker?</span>
+                    <button className="btn btn-ghost btn-sm" style={{color:"var(--error)", borderColor:"var(--error)"}} onClick={() => { deleteChapter(ch.id); setConfirmDeleteId(null); }}>Ja</button>
+                    <button className="btn btn-ghost btn-sm" onClick={() => setConfirmDeleteId(null)}>Nee</button>
+                  </>
+                ) : (
+                  <>
+                    {!isRenamingThis && (
+                      <button className="btn btn-ghost btn-sm" style={{padding:"7px 9px"}} title="Naam wijzigen" onClick={() => { setRenamingChapterId(ch.id); setRenameName(ch.name); }}>✏</button>
+                    )}
+                    <button className="btn btn-ghost btn-sm" style={{padding:"7px 9px", color:"var(--error)", borderColor:"var(--error)"}} title="Verwijder hoofdstuk" onClick={() => setConfirmDeleteId(ch.id)}>🗑</button>
+                    <button className="btn btn-secondary btn-sm" onClick={() => { setLibrarySelectedChapterId(ch.id); setDraftVocab([]); setDraftFileCount(0); setLibraryError(""); setRenamingChapterId(null); setConfirmDeleteId(null); }}>Openen</button>
+                  </>
+                )}
+              </div>
+            </div>
+          );
+        })}
       </div>
     );
   };
